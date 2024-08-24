@@ -150,3 +150,4 @@ Percolator的二阶段的提交阶段是可以分为两个小阶段的：
 
 上面代码也体现了这个特点。
 `if firstIsPrimary && (actionIsCommit || actionIsCleanup){}`这部分是 Primary Key 的提交逻辑。等到执行完了，然后代码会执行到`if actionIsCommit {}`，这是 Secondary Keys 的提交，而这个提交可以交给一个协程去执行，甚至失败了也没有关系。
+

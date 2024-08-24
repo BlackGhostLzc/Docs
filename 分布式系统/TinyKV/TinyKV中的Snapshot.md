@@ -114,14 +114,17 @@ func (rn *RawNode) Advance(rd Ready) {
 }
 ```
 
+
+
 ## 快照发送
+
 当 Leader append 日志给落后 node 节点时，发现对方所需要的 entry 已经被 compact。此时 Leader 会发送 Snapshot 过去。
 ```go
 func (r *Raft) sendAppend(to uint64) bool {
     ...
     // 2C
     r.sendSnapshot(to)
-    ..
+    ...
 }
 ```
 当 Leader 需要发送 Snapshot 时，调用 `r.RaftLog.storage.Snapshot()` 生成 Snapshot。因为 Snapshot 很大，不会马上生成，这里为了避免阻塞，如果 Snapshot 还没有生成好，Snapshot 会先返回 `raft.ErrSnapshotTemporarilyUnavailable` 错误，Leader 就应该放弃本次 Snapshot，等待下一次再次请求 Snapshot。
@@ -202,7 +205,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	d.Send(d.ctx.trans, ready.Messages)
 }
 ```
-如果是 snapshot 的话调用的 `SendSnapshotSock()` 函数，普通 msg 是调用哪个 `raftClient.Send()`函数发送
+如果是 snapshot 的话调用的 `SendSnapshotSock()` 函数，普通 msg 是调用 `raftClient.Send()`函数发送
 ```go
 func (t *ServerTransport) WriteData(storeID uint64, addr string, msg *raft_serverpb.RaftMessage) {
 	if msg.GetMessage().GetSnapshot() != nil {
@@ -215,9 +218,99 @@ func (t *ServerTransport) WriteData(storeID uint64, addr string, msg *raft_serve
 }
 ```
 
-## 快照接收
-目标 RaftStore 在 `server.go` 中的 `Snapshot()` 接收发送过来的 `Snapshot`。之后生成一个 `recvSnapTask` 请求到 `snapWorker`中。`snap_runner.go` 中收到 `recvSnapTask` 请求，开始下载发送过来的 `Snapshot` 并保存在本地（此时还没应用），同时生成 `pb.MessageType_MsgSnapshot` 发送到要接收的 peer 上。
-随后目标 peer 会在 `OnRaftMsg()` 中像处理普通 `msg` 一样，将 `pb.MessageType_MsgSnapshot` 通过 `Step()` 输入 RawNode。
+这个`SendSnapshotSock()`函数如下：
+
+```go
+t.snapScheduler <- &sendSnapTask{
+	addr:     addr,
+	msg:      msg,
+	callback: callback,
+}
+```
+
+然后会有个 snap-worker 执行发送快照的任务：
+
+```go
+func (r *snapRunner) Handle(t worker.Task) {
+	switch t.(type) {
+	case *sendSnapTask:
+		r.send(t.(*sendSnapTask))
+	case *recvSnapTask:
+		r.recv(t.(*recvSnapTask))
+	}
+}
+```
+
+看这个`sendSnap`函数：
+
+```go
+	...
+	buf := make([]byte, snapChunkLen)
+	for remain := snap.TotalSize(); remain > 0; remain -= uint64(len(buf)) {
+		if remain < uint64(len(buf)) {
+			buf = buf[:remain]
+		}
+		_, err := io.ReadFull(snap, buf)
+		if err != nil {
+			return errors.Errorf("failed to read snapshot chunk: %v", err)
+		}
+		err = stream.Send(&raft_serverpb.SnapshotChunk{Data: buf})
+		if err != nil {
+			return err
+		}
+	}
+	_, err = stream.CloseAndRecv()
+	...
+```
+
+如果你不懂Go语法，看到`io.ReadFull(snap, buf)`一定有这样一个疑问，`snap`怎么可以作为`io.ReadFull`的参数呢，实际上，`snap` 它实际上是一个 `io.Reader` 实现。虽然快照对象可能是自定义类型，但它实现了 `io.Reader` 接口，允许数据以流的形式被读取。`snap`的`Read`接口如下，实际上就是遍历所有的CF文件，其中维护一个`cfIndex`表示的是当前遍历文件的位置，而我们知道，文件描述符会维护文件内部的一个`offset`，`read`系统调用后会自动进行`offset`的更新，所以我们只需要维护这个`cfIndex`就行。
+
+```go
+func (s *Snap) Read(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	for s.cfIndex < len(s.CFFiles) {
+		cfFile := s.CFFiles[s.cfIndex]
+		if cfFile.Size == 0 {
+			s.cfIndex++
+			continue
+		}
+		n, err := cfFile.File.Read(b)
+		if n > 0 {
+			return n, nil
+		}
+		if err != nil {
+			if err == io.EOF {
+				s.cfIndex++
+				continue
+			}
+			return 0, errors.WithStack(err)
+		}
+	}
+	return 0, io.EOF
+}
+```
+
+
+
+## 快照接收与应用
+
+快照的接收如下，它先调用`recvSnap`函数接收，并把snapshot写入本地文件中，然后再对 raft 模块发送一个 msg ，需要raft 调用 `handleSnapshot()`函数。
+
+```go
+func (r *snapRunner) recv(t *recvSnapTask) {
+	// 这个 recvSnap 函数和 sendSnap 函数逻辑差不多
+    msg, err := r.recvSnap(t.stream)
+	if err == nil {
+		r.router.SendRaftMessage(msg)
+	}
+	t.callback(err)
+}
+```
+
+`handleSnapshot`函数先做一些判断，然后会设置`pendingSnapshot`，待应用快照。
+
 ```go
 case pb.MessageType_MsgSnapshot:
 	r.handleSnapshot(m)
@@ -226,7 +319,7 @@ case pb.MessageType_MsgSnapshot:
 ```go
 r.RaftLog.pendingSnapshot = m.Snapshot
 ```
-然后再由`HandleRaftReady()`对 snapshot 进行回放，调用函数`ApplySnapshot()`(这里流程是`HandleRaftReady()` -> `SaveReadyState()` -> `ApplySnapshot()`)
+然后再由`HandleRaftReady()`对 snapshot 进行回放，调用函数`ApplySnapshot()`(这里流程是`HandleRaftReady()` -> `SaveReadyState()` -> `ApplySnapshot()`)，`ready`中的`snapshot`就是`pendingSnapshot`。
 
 ```go
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
@@ -242,10 +335,81 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
     .....
 }
 ```
+这个`ApplySnapshot`函数主要的操作如下：
+
+```go
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: snapData.Region.GetId(),
+		Notifier: ch,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.GetStartKey(),
+		EndKey:   snapData.Region.GetEndKey(),
+	}
+```
+
+随后会被这个`regionTaskHandler`的`Handle`函数处理：
+
+```go
+func (r *regionTaskHandler) Handle(t worker.Task) {
+	switch t.(type) {
+	case *RegionTaskGen:
+		task := t.(*RegionTaskGen)
+		// It is safe for now to handle generating and applying snapshot concurrently,
+		// but it may not when merge is implemented.
+		r.ctx.handleGen(task.RegionId, task.Notifier)
+	case *RegionTaskApply:
+		task := t.(*RegionTaskApply)
+		r.ctx.handleApply(task.RegionId, task.Notifier, task.StartKey, task.EndKey, task.SnapMeta)
+	case *RegionTaskDestroy:
+		task := t.(*RegionTaskDestroy)
+		r.ctx.cleanUpRange(task.RegionId, task.StartKey, task.EndKey)
+	}
+}
+```
+
+`handleApply`函数会调用`applySnap`函数进行快照的应用。
+
+```go
+// applySnap applies snapshot data of the Region.
+func (snapCtx *snapContext) applySnap(regionId uint64, startKey, endKey []byte, snapMeta *eraftpb.SnapshotMetadata) error {
+	log.Infof("begin apply snap data. [regionId: %d]", regionId)
+
+	// cleanUpOriginData clear up the region data before applying snapshot
+	snapCtx.cleanUpRange(regionId, startKey, endKey)
+
+	snapKey := snap.SnapKey{RegionID: regionId, Index: snapMeta.Index, Term: snapMeta.Term}
+	snapCtx.mgr.Register(snapKey, snap.SnapEntryApplying)
+	defer snapCtx.mgr.Deregister(snapKey, snap.SnapEntryApplying)
+
+	snapshot, err := snapCtx.mgr.GetSnapshotForApplying(snapKey)
+	if err != nil {
+		return errors.New(fmt.Sprintf("missing snapshot file %s", err))
+	}
+
+	t := time.Now()
+	applyOptions := snap.NewApplyOptions(snapCtx.engines.Kv, &metapb.Region{
+		Id:       regionId,
+		StartKey: startKey,
+		EndKey:   endKey,
+	})
+	if err := snapshot.Apply(*applyOptions); err != nil {
+		return err
+	}
+
+	log.Infof("applying new data. [regionId: %d, timeTakes: %v]", regionId, time.Now().Sub(t))
+	return nil
+}
+```
+
+
+
 最后在 `Advance()` 的时候，清除 `pendingSnapshot`。至此，整个 Snapshot 接收流程结束。
 可以看到 Snapshot 的 msg 发送不像传统的 msg，因为 Snapshot 通常很大，如果和普通方法一样发送，会占用大量的内网宽带。同时如果你不切片发送，中间一旦一部分失败了，就全功尽气。这个迅雷的切片下载一个道理。
 
+
+
 ## 快照生成
+
 在上面我们说过，在通过`SnapShot()`获得 snapshot 的时候，实际会有一个异步的处理，把任务放入`peerStorage.regionSched`中。
 ```go
 // schedule snapshot generate task
@@ -287,15 +451,15 @@ func (snapCtx *snapContext) handleGen(regionId uint64, notifier chan<- *eraftpb.
 ```
 ```go
 func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId uint64) (*eraftpb.Snapshot, error) {
-	log.Debugf("begin to generate a snapshot. [regionId: %d]", regionId)
-
 	txn := engines.Kv.NewTransaction(false)
-
+	
+    // 这里的 index 是 appliedIndex
 	index, term, err := getAppliedIdxTermForSnapshot(engines.Raft, txn, regionId)
 	if err != nil {
 		return nil, err
 	}
-
+	
+    // 这个 snapkey 可以标识一个快照，并且可以通过 snapkey 为 快照文件命名 
 	key := snap.SnapKey{RegionID: regionId, Index: index, Term: term}
 	mgr.Register(key, snap.SnapEntryGenerating)
 	defer mgr.Deregister(key, snap.SnapEntryGenerating)
@@ -312,6 +476,7 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 	region := regionState.GetRegion()
 	confState := util.ConfStateFromRegion(region)
 	snapshot := &eraftpb.Snapshot{
+        // Meta data 表示的是这个 snapshot 是 [appliedIndex, term] 日志前(包括这条)的全量 KV 键值对
 		Metadata: &eraftpb.SnapshotMetadata{
 			Index:     key.Index,
 			Term:      key.Term,
@@ -333,14 +498,15 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 	return snapshot, err
 }
 ```
-这个函数重点在`err = s.Build(txn, region, snapshotData, &snapshotStatics, mgr)`这行代码
+这个函数重点在`err = s.Build(txn, region, snapshotData, &snapshotStatics, mgr)`这行代码。
 这个`Build()`函数后面调用了`build()`函数：
+
 ```go
 func (b *snapBuilder) build() error {
 	defer b.txn.Discard()
 	startKey, endKey := b.region.StartKey, b.region.EndKey
-
-	for _, file := range b.cfFiles {
+    // 需要写三个文件(cf)，分别是default、write、lock
+    for _, file := range b.cfFiles {
 		cf := file.CF
 		sstWriter := file.SstWriter
 
@@ -372,5 +538,7 @@ func (b *snapBuilder) build() error {
 }
 ```
 
-## 快照的应用(Apply)
+
+
+
 
