@@ -16,6 +16,8 @@ MoE架构与非MoE架构在几乎所有的组件上都是相似的，只有一�
 
 <img src="./img/MoE-Routing-TopK.jpg" style="zoom:50%;" />
 
+也有使用哈希作为路由算法的实现，有时也能提升一定的性能。可以从两个角度进行解释。在进行哈希的时候，相同的token也会去到相同的专家，因此每个专家仍会获得输入的一个确定子集，这样一来，仍然会发生一些专业化，只不过这种专业化是非语义的。
+
 
 
 ## MoE的一些变体
@@ -85,3 +87,53 @@ $P_i$表示Router计划分配给专家`i`的概率总和。
 **避免全局辅助损失**：传统方法（如 Switch Transformer）需添加平衡损失项，可能干扰主任务训练
 
 <img src="./img/MoE-Balance-1.jpg" style="zoom:67%;" />
+
+
+
+## MoE的稳定性
+
+MoE模型有这样一个特性，当我们尝试微调它的时候，它可能会崩溃。有一个优化方法是在softmax中引入z-loss（具体方法和上一节讲的一样）。
+
+有MoE的架构进行微调通常过拟合现象非常严重（模型很大，但微调数据很小），一个解决方法是在架构MoE的时候，让它不是每一层都是MoE（交替使用）。
+
+### upcycling
+
+upcycling 的基本思想是利用一个已经训练好的传统（稠密）Transformer模型的权重，将其“升级”为一个MoE模型，而不是从头开始训练MoE。避免了从头开始训练一个巨大的MoE模型所需的昂贵成本。通过利用预训练好的稠密模型权重，MoE模型的训练可以更快地收敛。
+
+![](./img/MoE-upcycling.jpg)
+
+### stochasticity of MoE models
+
+**1.Routing**
+
+**2.Permutation**
+
+* 根据路由结果，token 被分组。例如，"The" 和 "jumped" 都被分配给 Expert-0，"quick" 被分配给 Expert-1，等等。
+
+* 在这一步，引入了一个关键的参数：**`capacity_factor`**。它决定了每个专家可以处理的最大 token 数量。如果分配给某个专家的 token 数量超过了其容量，多余的 token 就会被**丢弃（dropped）**。
+
+**3.Computation**：计算被分配给每个专家的 token。
+
+**4.Un-Permutation**：将专家的计算结果重新排列，并根据路由时的概率进行加权。
+
+![](./img/MoE-stochasticity.jpg)
+
+
+
+## DeepSeek MoE
+
+这是DeepSeek V3的MoE架构：
+
+![](./img/DeepSeekV3.jpg)
+
+DeepSeek对注意力机制部分有一个巧妙的优化，叫做**MLA**，也就是多头潜在注意力机制。与GQA一样，它也是为了优化KV缓存大小所需要的推理优化。MLA并没有减少头数，而是实际上将这些头投影到一个更低维度的空间。
+
+![](./img/DeepSeek-MLA.jpg)
+
+![](./img/DeepSeek-MLA-1.jpg)
+
+如上图，我们把H(t)投影到一个低维度的C，然后再把它上投影回K和V，我们就只需要缓存C。
+
+但看上图，我们也许会疑惑，这里不是多乘了一个$W^{UK}$吗，这不就需要浪费一些FLOPs吗？
+
+> 巧妙之处在于，对于K我们需要和Q做点乘，Q本身有一个投影矩阵，这里的技巧是，可以把$W^{UK}$和这个$Q$矩阵合并成一个矩阵，我们交给神经网络去学就可以了。$W^{UK}$ can be merged into the Q projection。

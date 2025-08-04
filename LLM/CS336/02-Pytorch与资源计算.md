@@ -19,8 +19,14 @@ FLOPs=2\*B\*D\*K（每个元素要做一次乘法和一次加法）。
 
 
 
+## 梯度
+
 我们再来简单看一下**梯度的计算**
 
+* Forward pass: 2 (# data points) (# parameters) FLOPs
 
+* Backward pass: 4 (# data points) (# parameters) FLOPs
 
- 
+* Total: 6 (# data points) (# parameters) FLOPs
+
+这个规律主要适用于**全连接层（Fully Connected Layers）**。
