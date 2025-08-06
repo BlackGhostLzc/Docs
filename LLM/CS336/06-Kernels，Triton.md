@@ -78,3 +78,6 @@ def manual_gelu(x: torch.Tensor):
 ```
 
 可以看到这里有很多的运算，速度会不会变慢呢？使用Profiling工具进行验证。手写的GELU竟然比Pytorch的实现慢了一个数量级。manual_gelu调用了大量的CUDA内核，而pytorch_gelu只启动了一个CUDA内核，Pytorch的开发者肯定使用了尽可能最底层级的语言编写它。我们不会涉及到最低的层面，而是会使用C API编写CUDA内核。
+
+
+
