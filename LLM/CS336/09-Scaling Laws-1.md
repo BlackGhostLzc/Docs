@@ -76,3 +76,13 @@ Data Scaling也就是拟合一条简单的公式，将数据集大小映射到�
 
 
 
+
+
+## How to use
+
+**Train a few smaller models** (训练一些较小的模型): 首先，你需要用较小规模的模型进行实验。
+
+**Establish a scaling law (e.g. ADAM vs SGD scaling law)** (建立一个缩放法则): 通过分析这些小模型在不同设置下的表现，你可以归纳出性能如何随模型规模、数据量或超参数的变化而变化的规律。比如，你可以发现使用Adam和SGD时，性能随模型规模增加的趋势是不同的，这就是一个“缩放法则”。
+
+**Select optimal hyperparam based on the scaling law prediction.** (根据缩放法则的预测选择最优超参数): 有了这个法则，你就可以预测出在大规模模型上哪种超参数组合会带来最好的结果，而无需进行昂贵的大规模实验。
+
