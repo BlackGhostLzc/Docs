@@ -81,7 +81,27 @@ def manual_gelu(x: torch.Tensor):
 
 ### CUDA
 
+CUDA实际上是用于与GPU进行交互和编程的C API。编写CUDA时，有一个grid，它是由一组thread block组成。 
 
+![](./img/GPU-ExcutionModel.jpg)
+
+这一部分的代码参考课件。
+
+为什么非CUDA的版本比CUDA的版本慢很多？
+
+非CUDA的版本会调用很多核函数，会涉及很多向量从GPU全局内存到SM内存的读取和写入，并且核函数的调用也有开销。
 
 ### Triton
+
+Triton时OpenAI在2021年开发的一种语言，使用Python抽象来编写CUDA内核，只需要考虑thread block，不需要处理thread的细节。
+
+Triton会编译成低级的GPU机器码，可以查看这种低级码，叫做PTX。
+
+关于CUDA和Triton，后续可能会更加深入了解这一块，出一些相关的合集，先挖个坑。
+
+### Torch Compile
+
+Torch Compile可以接收未优化的Pytorch代码，生成更优化的代码。我们将`manual_gelu`的Pytorch版本交给Torch Compile优化，它可能会尝试进行内核融合。最后将Torch Compile优化过的代码与CUDA、Triton相比，都比这两种要好。
+
+
 
