@@ -74,7 +74,29 @@ Data Scaling也就是拟合一条简单的公式，将数据集大小映射到�
 
 主要考虑下面这几个选择：Architecture、Optimizer、Aspect ratio / depth、Batch size。
 
+1. Architecture：Transformer架构比LSTM架构更好
+2. Optimizer：针对数据集大小做scaling law
+3. Aspect ratio / depth：depth 还是 width 影响巨大呢，1 vs 2 layers 看起来差异巨大，增加 layer 后 loss 更低，但其他看起来都比较 stable。
 
+<img src="./img/DepthWidth-Scaling.png" style="zoom:50%;" />
+
+4. Batch size：batch size超过了某个点后会有收益递减。也就是说当batch size小于noise scale时，增加batch size几乎等同于多迈出几步梯度更新（相当于将batch size翻倍，其效果就像迈出两步梯度更新一样好）。临界批量大小（Critical Batch Size）：**Critical batch = min number of examples for target loss / min number of steps for target loss 。**
+
+<img src="./img/Scaling-BatchSize.jpg" style="zoom: 50%;" />
+
+5. Learning rate：观察左图最优的学习率在不同的点。增大模型规模（width），最优学习率会比较小。也就是学习率应该以宽度的倒数这个速率进行缩放。果我们盲目地增加模型大小，就需要重新调整学习率，而且这个过程非常敏感。muP 是一种参数化方法，它通过重新设计模型的初始化和学习率的缩放规则，使得在扩展模型大小时，最优学习率保持不变。
+
+<img src="./img/Scaling-LearningRate.jpg" style="zoom: 50%;" />
+
+值得注意的是，训练阶段的 scaling 是可控的，但下游任务的 scaling 常常不确定，比如一些 benchmark 的表现。
+
+还有一个问题是：我们是需要更多的数据还是更大的模型？
+
+<img src="./img/scaling-laws-2.jpg" style="zoom:33%;" />
+
+* 增加 n 或 m 都能降低 Error，但收益是幂律递减的
+* 总误差是两个误差源的加和：数据不足 + 模型容量不足
+* 最终误差会收敛到某个不可降低的最低误差 C
 
 
 
